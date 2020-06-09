@@ -36,28 +36,67 @@
  *
  */
 
-
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"flag"
+	"io/ioutil"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
+func main() {
 
-func main() {	
+	apiserverAddr := flag.String("apiserver", "https://10.0.0.1:443", "Kubernetes apiserver address.")
+	cert := flag.String("cert", "", "cert file")
+	key := flag.String("key", "", "key file")
+	cacert := flag.String("cacert", "", "cacert file")
+	hostnameToIP := flag.Bool("hostname-to-ip", false, "need to convert the hostname to the node ip")
+
+	flag.Parse()
+
+	if len(*apiserverAddr) == 0 {
+		log.Fatal("ERROR: no apiserver address.")
+	}
+
+	u, err := url.Parse(*apiserverAddr)
+	if err != nil {
+		log.Fatalf("ERROR: parse apiserver address error: %s.", err)
+	}
+
+	opts := &Options{
+		APIServerURL: u,
+		CertFile:     *cert,
+		KeyFile:      *key,
+		CACertFile:   *cacert,
+		HostnameToIP: *hostnameToIP,
+	}
+	log.Printf("%#v", opts)
+
+	err = createHttpClient(opts)
+	if err != nil {
+		log.Fatalf("ERROR: create http client error: %s.", err)
+	}
 
 	channel := make(chan struct{})
 	var wait sync.WaitGroup
 
-	wait.Add(1)
-	go trackUnscheduledPods(channel, &wait)
+	proc := NewProcessor(opts)
 
 	wait.Add(1)
-	go resolveUnscheduledPods(20, channel, &wait)
+	go proc.trackUnscheduledPods(channel, &wait)
+
+	wait.Add(1)
+	go proc.resolveUnscheduledPods(20, channel, &wait)
 
 	signalch := make(chan os.Signal, 1)
 	signal.Notify(signalch, syscall.SIGINT, syscall.SIGTERM)
@@ -70,4 +109,41 @@ func main() {
 			os.Exit(0)
 		}
 	}
+}
+
+func createHttpClient(opts *Options) error {
+	if opts.APIServerURL.Scheme == "http" {
+		opts.Client = http.DefaultClient
+		return nil
+	}
+
+	caCert, err := ioutil.ReadFile(opts.CACertFile)
+	if err != nil {
+		log.Printf("open %s error: %s", opts.CACertFile, err)
+		return err
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCert)
+	cert, err := tls.LoadX509KeyPair(opts.CertFile, opts.KeyFile)
+	if err != nil {
+		log.Printf("load %s and %s error: %s", opts.CertFile, opts.KeyFile, err)
+		return err
+	}
+	opts.Client = &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+			TLSClientConfig: &tls.Config{
+				RootCAs:      pool,
+				Certificates: []tls.Certificate{cert},
+			},
+		},
+	}
+
+	return nil
 }

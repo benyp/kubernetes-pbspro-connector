@@ -38,22 +38,35 @@
 
 package main
 
-import (	
+import (
 	"log"
 	"sync"
 	"time"
 )
 
-var processLock = &sync.Mutex{}
+type Processor struct {
+	opts        *Options
+	provider    *KubeProvider
+	processLock sync.Mutex
+}
 
-func resolveUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGroup) {			
+func NewProcessor(opts *Options) *Processor {
+	return &Processor{
+		opts: opts,
+		provider: &KubeProvider{
+			opts: opts,
+		},
+	}
+}
+
+func (p *Processor) resolveUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGroup) {
 	for {
 		log.Println("\nStarting Scheduler Iteration")
 		select {
-		case <-time.After(time.Duration(interval) * time.Second):							
-			err := reschedulePod()
+		case <-time.After(time.Duration(interval) * time.Second):
+			err := p.reschedulePod()
 			if err != nil {
-				log.Println(err)
+				log.Printf("reschedule pod error: %s", err)
 			}
 			log.Println("End of Iteration")
 		case <-done:
@@ -64,21 +77,21 @@ func resolveUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGroup
 	}
 }
 
-func trackUnscheduledPods(done chan struct{}, wg *sync.WaitGroup) {	
-	pods, errc := watchUnscheduledPods()
+func (p *Processor) trackUnscheduledPods(done chan struct{}, wg *sync.WaitGroup) {
+	pods, errc := p.provider.watchUnscheduledPods()
 
-	for {		
+	for {
 		select {
 		case err := <-errc:
 			log.Println(err)
 		case pod := <-pods:
-			processLock.Lock()
-			time.Sleep(2 * time.Second)			
-			err := schedulePod(&pod)
+			p.processLock.Lock()
+			time.Sleep(2 * time.Second)
+			err := p.schedulePod(&pod)
 			if err != nil {
-				log.Println(err)
+				log.Printf("schedule pod %s error: %s", pod.Metadata.Name, err)
 			}
-			processLock.Unlock()
+			p.processLock.Unlock()
 		case <-done:
 			wg.Done()
 			log.Println("Stopped scheduler.")
@@ -87,30 +100,34 @@ func trackUnscheduledPods(done chan struct{}, wg *sync.WaitGroup) {
 	}
 }
 
-func schedulePod(pod *Pod) error {	
-	nodevalue,err := fit(pod)
+func (p *Processor) schedulePod(pod *Pod) error {
+	log.Printf("schedule pod %s", pod.Metadata.Name)
+	nodevalue, err := p.provider.fit(pod)
 	if err != nil {
+		log.Printf("fit pod %s error: %s", pod.Metadata.Name, err)
 		return err
 	}
 	if nodevalue == "" {
 		return nil
 	}
-	err = bind(pod, nodevalue)
+	err = p.provider.bind(pod, nodevalue)
 	if err != nil {
+		log.Printf("bind pod %s to node %s error: %s", pod.Metadata.Name, nodevalue, err)
 		return err
-	}	
+	}
 	return nil
 }
 
-func reschedulePod() error {
-	processLock.Lock()
-	defer processLock.Unlock()
-	pods, err := getUnscheduledPods()
+func (p *Processor) reschedulePod() error {
+	p.processLock.Lock()
+	defer p.processLock.Unlock()
+	pods, err := p.provider.getUnscheduledPods()
 	if err != nil {
+		log.Printf("get unscheduled pods error: %s", err)
 		return err
 	}
-	for _, pod := range pods.Items {		
-		err := schedulePod(&pod)
+	for _, pod := range pods.Items {
+		err := p.schedulePod(&pod)
 		if err != nil {
 			log.Println(err)
 		}

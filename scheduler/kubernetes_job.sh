@@ -1,11 +1,12 @@
+#!/bin/bash
 #PBS -joe -o localhost:/tmp
 sleep 30
-while :
+while true
 do
-       	docker ps | grep $PODNAME
-        if [ $? -ne 0 ]; then
-                exit 0
-        else
-                sleep 5
-        fi
+  docker ps | grep $PODNAME
+  if [ $? -ne 0 ]; then
+    exit 0
+  else
+    sleep 5
+  fi
 done
